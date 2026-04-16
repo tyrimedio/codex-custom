@@ -158,6 +158,10 @@ async fn load_config_records_global_agents_path() -> std::io::Result<()> {
         config.user_instructions_path.as_deref(),
         Some(global_agents_path.as_path())
     );
+    assert_eq!(
+        config.user_instructions_paths,
+        vec![global_agents_path.abs()]
+    );
     Ok(())
 }
 
@@ -185,6 +189,65 @@ async fn load_config_records_preferred_global_agents_override_path() -> std::io:
     assert_eq!(
         config.user_instructions_path.as_deref(),
         Some(global_agents_override_path.as_path())
+    );
+    assert_eq!(
+        config.user_instructions_paths,
+        vec![global_agents_override_path.abs()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_appends_global_memory_after_agents() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let global_agents_path = codex_home.path().join(DEFAULT_PROJECT_DOC_FILENAME);
+    let global_memory_path = codex_home.path().join(GLOBAL_MEMORY_DOC_FILENAME);
+    std::fs::write(&global_agents_path, "global instructions")?;
+    std::fs::write(&global_memory_path, "\n  durable memory  \n")?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.user_instructions.as_deref(),
+        Some("global instructions\n\n--- user-memory ---\n\ndurable memory")
+    );
+    assert_eq!(
+        config.user_instructions_path.as_deref(),
+        Some(global_agents_path.as_path())
+    );
+    assert_eq!(
+        config.user_instructions_paths,
+        vec![global_agents_path.abs(), global_memory_path.abs()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_uses_global_memory_when_agents_missing() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let global_memory_path = codex_home.path().join(GLOBAL_MEMORY_DOC_FILENAME);
+    std::fs::write(&global_memory_path, "durable memory")?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.user_instructions.as_deref(), Some("durable memory"));
+    assert_eq!(
+        config.user_instructions_path.as_deref(),
+        Some(global_memory_path.as_path())
+    );
+    assert_eq!(
+        config.user_instructions_paths,
+        vec![global_memory_path.abs()]
     );
     Ok(())
 }
@@ -4653,6 +4716,7 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             approvals_reviewer: ApprovalsReviewer::User,
             enforce_residency: Constrained::allow_any(/*initial_value*/ None),
             user_instructions: None,
+            user_instructions_paths: Vec::new(),
             user_instructions_path: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -4804,6 +4868,7 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         approvals_reviewer: ApprovalsReviewer::User,
         enforce_residency: Constrained::allow_any(/*initial_value*/ None),
         user_instructions: None,
+        user_instructions_paths: Vec::new(),
         user_instructions_path: None,
         notify: None,
         cwd: fixture.cwd(),
@@ -4953,6 +5018,7 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         approvals_reviewer: ApprovalsReviewer::User,
         enforce_residency: Constrained::allow_any(/*initial_value*/ None),
         user_instructions: None,
+        user_instructions_paths: Vec::new(),
         user_instructions_path: None,
         notify: None,
         cwd: fixture.cwd(),
@@ -5087,6 +5153,7 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         approvals_reviewer: ApprovalsReviewer::User,
         enforce_residency: Constrained::allow_any(/*initial_value*/ None),
         user_instructions: None,
+        user_instructions_paths: Vec::new(),
         user_instructions_path: None,
         notify: None,
         cwd: fixture.cwd(),

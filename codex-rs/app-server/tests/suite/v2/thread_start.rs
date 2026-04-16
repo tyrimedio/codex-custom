@@ -19,6 +19,7 @@ use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_core::DEFAULT_PROJECT_DOC_FILENAME;
 use codex_core::config::set_project_trust_level;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
@@ -45,6 +46,8 @@ use super::analytics::thread_initialized_event;
 use super::analytics::wait_for_analytics_payload;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const GLOBAL_MEMORY_DOC_FILENAME: &str = "MEMORY.md";
+const PROJECT_MEMORY_DOC_RELATIVE_PATH: &str = ".codex/MEMORY.md";
 
 #[tokio::test]
 async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
@@ -200,6 +203,66 @@ async fn thread_start_response_includes_loaded_instruction_sources() -> Result<(
     let expected_instruction_sources = vec![
         std::fs::canonicalize(global_agents_path)?,
         std::fs::canonicalize(project_agents_path)?,
+    ]
+    .into_iter()
+    .map(normalize_path_for_comparison)
+    .collect::<Vec<_>>();
+
+    assert_eq!(instruction_sources, expected_instruction_sources);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_response_includes_memory_instruction_sources() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+
+    let global_agents_path = codex_home.path().join(DEFAULT_PROJECT_DOC_FILENAME);
+    let global_memory_path = codex_home.path().join(GLOBAL_MEMORY_DOC_FILENAME);
+    std::fs::write(&global_agents_path, "global instructions")?;
+    std::fs::write(&global_memory_path, "global memory")?;
+
+    let workspace = TempDir::new()?;
+    let project_agents_path = workspace.path().join(DEFAULT_PROJECT_DOC_FILENAME);
+    let project_memory_path = workspace.path().join(PROJECT_MEMORY_DOC_RELATIVE_PATH);
+    std::fs::write(&project_agents_path, "project instructions")?;
+    std::fs::create_dir_all(
+        project_memory_path
+            .parent()
+            .expect("project memory should have a parent directory"),
+    )?;
+    std::fs::write(&project_memory_path, "project memory")?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            cwd: Some(workspace.path().display().to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let ThreadStartResponse {
+        instruction_sources,
+        ..
+    } = to_response::<ThreadStartResponse>(response)?;
+
+    let instruction_sources = instruction_sources
+        .into_iter()
+        .map(normalize_path_for_comparison)
+        .collect::<Vec<_>>();
+    let expected_instruction_sources = vec![
+        std::fs::canonicalize(global_agents_path)?,
+        std::fs::canonicalize(global_memory_path)?,
+        std::fs::canonicalize(project_agents_path)?,
+        std::fs::canonicalize(project_memory_path)?,
     ]
     .into_iter()
     .map(normalize_path_for_comparison)

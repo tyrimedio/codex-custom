@@ -519,6 +519,152 @@ async fn apps_feature_does_not_append_to_project_doc_user_instructions() {
     assert_eq!(res, "base doc");
 }
 
+#[tokio::test]
+async fn project_memory_is_loaded_when_agents_doc_is_absent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let memory_path = tmp.path().join(PROJECT_MEMORY_DOC_RELATIVE_PATH);
+    fs::create_dir_all(
+        memory_path
+            .parent()
+            .expect("project memory should have a parent directory"),
+    )
+    .unwrap();
+    fs::write(&memory_path, "durable memory").unwrap();
+
+    let cfg = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("project memory instructions expected");
+    assert!(
+        res.starts_with("--- project-memory "),
+        "expected project memory header: {res}"
+    );
+    assert!(
+        res.ends_with(".codex/MEMORY.md ---\n\ndurable memory"),
+        "expected project memory suffix: {res}"
+    );
+
+    let discovery = discover_project_doc_paths(&cfg)
+        .await
+        .expect("discover paths");
+    assert_eq!(discovery.len(), 1);
+    assert!(
+        discovery[0]
+            .as_path()
+            .to_string_lossy()
+            .ends_with(".codex/MEMORY.md"),
+        "expected memory path in discovery: {:?}",
+        discovery
+    );
+}
+
+#[tokio::test]
+async fn project_memory_is_appended_after_agents_doc() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_path = tmp.path().join(DEFAULT_PROJECT_DOC_FILENAME);
+    let memory_path = tmp.path().join(PROJECT_MEMORY_DOC_RELATIVE_PATH);
+    fs::write(&agents_path, "base doc").unwrap();
+    fs::create_dir_all(
+        memory_path
+            .parent()
+            .expect("project memory should have a parent directory"),
+    )
+    .unwrap();
+    fs::write(&memory_path, "durable memory").unwrap();
+
+    let cfg = make_config(&tmp, /*limit*/ 4096, /*instructions*/ None).await;
+
+    let res = get_user_instructions(&cfg)
+        .await
+        .expect("instructions expected");
+    assert!(
+        res.starts_with("base doc\n\n--- project-memory "),
+        "expected agents doc before project memory: {res}"
+    );
+    assert!(
+        res.ends_with(".codex/MEMORY.md ---\n\ndurable memory"),
+        "expected project memory suffix: {res}"
+    );
+
+    let discovery = discover_project_doc_paths(&cfg)
+        .await
+        .expect("discover paths");
+    assert_eq!(discovery.len(), 2);
+    assert!(
+        discovery[0]
+            .as_path()
+            .to_string_lossy()
+            .ends_with("AGENTS.md"),
+        "expected agents path in discovery: {:?}",
+        discovery
+    );
+    assert!(
+        discovery[1]
+            .as_path()
+            .to_string_lossy()
+            .ends_with(".codex/MEMORY.md"),
+        "expected memory path in discovery: {:?}",
+        discovery
+    );
+}
+
+#[tokio::test]
+async fn project_doc_discovery_interleaves_agents_and_memory_by_scope() {
+    let repo = tempfile::tempdir().expect("tempdir");
+    fs::write(repo.path().join(".git"), "gitdir: /tmp/mock-git-dir\n").unwrap();
+
+    let nested = repo.path().join("workspace/crate_a");
+    fs::create_dir_all(&nested).unwrap();
+
+    let root_agents = repo.path().join(DEFAULT_PROJECT_DOC_FILENAME);
+    let root_memory = repo.path().join(PROJECT_MEMORY_DOC_RELATIVE_PATH);
+    let child_agents = nested.join(DEFAULT_PROJECT_DOC_FILENAME);
+    let child_memory = nested.join(PROJECT_MEMORY_DOC_RELATIVE_PATH);
+
+    fs::write(&root_agents, "root doc").unwrap();
+    fs::create_dir_all(
+        root_memory
+            .parent()
+            .expect("root memory should have a parent directory"),
+    )
+    .unwrap();
+    fs::write(&root_memory, "root memory").unwrap();
+    fs::write(&child_agents, "child doc").unwrap();
+    fs::create_dir_all(
+        child_memory
+            .parent()
+            .expect("child memory should have a parent directory"),
+    )
+    .unwrap();
+    fs::write(&child_memory, "child memory").unwrap();
+
+    let mut cfg = make_config(&repo, /*limit*/ 4096, /*instructions*/ None).await;
+    cfg.cwd = nested.abs();
+
+    let discovery = discover_project_doc_paths(&cfg)
+        .await
+        .expect("discover paths");
+    let discovery_suffixes = discovery
+        .iter()
+        .map(|path| {
+            path.as_path()
+                .to_string_lossy()
+                .trim_start_matches("/private")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        discovery_suffixes,
+        vec![
+            root_agents.display().to_string(),
+            root_memory.display().to_string(),
+            child_agents.display().to_string(),
+            child_memory.display().to_string(),
+        ]
+    );
+}
+
 fn create_skill(codex_home: PathBuf, name: &str, description: &str) {
     let skill_dir = codex_home.join(format!("skills/{name}"));
     fs::create_dir_all(&skill_dir).unwrap();
