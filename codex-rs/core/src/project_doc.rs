@@ -1,7 +1,9 @@
 //! Project-level documentation discovery.
 //!
-//! Project-level documentation is primarily stored in files named `AGENTS.md`.
-//! Additional fallback filenames can be configured via `project_doc_fallback_filenames`.
+//! Project-level instructions are primarily stored in files named `AGENTS.md`,
+//! with persistent project memory in `.codex/MEMORY.md`.
+//! Additional fallback filenames can be configured via
+//! `project_doc_fallback_filenames`.
 //! We include the concatenation of all files found along the path from the
 //! project root to the current working directory as follows:
 //!
@@ -10,9 +12,11 @@
 //!     When `project_root_markers` is unset, the default marker list is used
 //!     (`.git`). If no marker is found, only the current working directory is
 //!     considered. An empty marker list disables parent traversal.
-//! 2.  Collect every `AGENTS.md` found from the project root down to the
-//!     current working directory (inclusive) and concatenate their contents in
-//!     that order.
+//! 2.  For each directory from the project root down to the current working
+//!     directory (inclusive), first collect the highest-priority project doc
+//!     candidate (`AGENTS.override.md`, `AGENTS.md`, then any configured
+//!     fallbacks), then collect `.codex/MEMORY.md` if present.
+//! 3.  Concatenate the discovered files in that order.
 //! 3.  We do **not** walk past the project root.
 
 use crate::config::Config;
@@ -37,10 +41,27 @@ pub(crate) const HIERARCHICAL_AGENTS_MESSAGE: &str =
 pub const DEFAULT_PROJECT_DOC_FILENAME: &str = "AGENTS.md";
 /// Preferred local override for project-level docs.
 pub const LOCAL_PROJECT_DOC_FILENAME: &str = "AGENTS.override.md";
+/// User-level persistent memory entrypoint under `~/.codex/`.
+pub const GLOBAL_MEMORY_DOC_FILENAME: &str = "MEMORY.md";
+/// Project-level persistent memory entrypoint discovered per directory scope.
+pub const PROJECT_MEMORY_DOC_RELATIVE_PATH: &str = ".codex/MEMORY.md";
 
 /// When both `Config::instructions` and the project doc are present, they will
 /// be concatenated with the following separator.
 const PROJECT_DOC_SEPARATOR: &str = "\n\n--- project-doc ---\n\n";
+const PROJECT_MEMORY_HEADER_PREFIX: &str = "--- project-memory ";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectInstructionSourceKind {
+    ProjectDoc,
+    ProjectMemory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectInstructionSource {
+    path: AbsolutePathBuf,
+    kind: ProjectInstructionSourceKind,
+}
 
 fn render_js_repl_instructions(config: &Config) -> Option<String> {
     if !config.features.enabled(Feature::JsRepl) {
@@ -157,27 +178,27 @@ async fn read_project_docs_with_fs(
         return Ok(None);
     }
 
-    let paths = discover_project_doc_paths(config, fs).await?;
-    if paths.is_empty() {
+    let sources = discover_project_doc_sources(config, fs).await?;
+    if sources.is_empty() {
         return Ok(None);
     }
 
     let mut remaining: u64 = max_total as u64;
     let mut parts: Vec<String> = Vec::new();
 
-    for p in paths {
+    for source in sources {
         if remaining == 0 {
             break;
         }
 
-        match fs.get_metadata(&p, /*sandbox*/ None).await {
+        match fs.get_metadata(&source.path, /*sandbox*/ None).await {
             Ok(metadata) if !metadata.is_file => continue,
             Ok(_) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
         }
 
-        let mut data = match fs.read_file(&p, /*sandbox*/ None).await {
+        let mut data = match fs.read_file(&source.path, /*sandbox*/ None).await {
             Ok(data) => data,
             Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
             Err(err) => return Err(err),
@@ -190,14 +211,14 @@ async fn read_project_docs_with_fs(
         if size > remaining {
             tracing::warn!(
                 "Project doc `{}` exceeds remaining budget ({} bytes) - truncating.",
-                p.display(),
+                source.path.display(),
                 remaining,
             );
         }
 
         let text = String::from_utf8_lossy(&data).to_string();
         if !text.trim().is_empty() {
-            parts.push(text);
+            parts.push(render_project_instruction_source(&source, text));
             remaining = remaining.saturating_sub(data.len() as u64);
         }
     }
@@ -206,6 +227,16 @@ async fn read_project_docs_with_fs(
         Ok(None)
     } else {
         Ok(Some(parts.join("\n\n")))
+    }
+}
+
+fn render_project_instruction_source(source: &ProjectInstructionSource, text: String) -> String {
+    match source.kind {
+        ProjectInstructionSourceKind::ProjectDoc => text,
+        ProjectInstructionSourceKind::ProjectMemory => format!(
+            "{PROJECT_MEMORY_HEADER_PREFIX}{} ---\n\n{text}",
+            source.path.display()
+        ),
     }
 }
 
@@ -218,6 +249,17 @@ pub async fn discover_project_doc_paths(
     config: &Config,
     fs: &dyn ExecutorFileSystem,
 ) -> io::Result<Vec<AbsolutePathBuf>> {
+    Ok(discover_project_doc_sources(config, fs)
+        .await?
+        .into_iter()
+        .map(|source| source.path)
+        .collect())
+}
+
+async fn discover_project_doc_sources(
+    config: &Config,
+    fs: &dyn ExecutorFileSystem,
+) -> io::Result<Vec<ProjectInstructionSource>> {
     if config.project_doc_max_bytes == 0 {
         return Ok(Vec::new());
     }
@@ -285,20 +327,34 @@ pub async fn discover_project_doc_paths(
         vec![dir]
     };
 
-    let mut found: Vec<AbsolutePathBuf> = Vec::new();
+    let mut found = Vec::new();
     let candidate_filenames = candidate_filenames(config);
     for d in search_dirs {
         for name in &candidate_filenames {
             let candidate = d.join(name);
             match fs.get_metadata(&candidate, /*sandbox*/ None).await {
                 Ok(md) if md.is_file => {
-                    found.push(candidate);
+                    found.push(ProjectInstructionSource {
+                        path: candidate,
+                        kind: ProjectInstructionSourceKind::ProjectDoc,
+                    });
                     break;
                 }
                 Ok(_) => {}
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(err),
             }
+        }
+
+        let memory_candidate = d.join(PROJECT_MEMORY_DOC_RELATIVE_PATH);
+        match fs.get_metadata(&memory_candidate, /*sandbox*/ None).await {
+            Ok(md) if md.is_file => found.push(ProjectInstructionSource {
+                path: memory_candidate,
+                kind: ProjectInstructionSourceKind::ProjectMemory,
+            }),
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
         }
     }
 

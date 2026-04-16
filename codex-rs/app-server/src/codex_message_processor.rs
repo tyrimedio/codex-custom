@@ -617,8 +617,7 @@ pub(crate) struct CodexMessageProcessorArgs {
 
 impl CodexMessageProcessor {
     async fn instruction_sources_from_config(config: &Config) -> Vec<AbsolutePathBuf> {
-        let mut paths: Vec<AbsolutePathBuf> =
-            config.user_instructions_path.iter().cloned().collect();
+        let mut paths = config.user_instructions_paths.clone();
         match codex_core::discover_project_doc_paths(config, LOCAL_FS.as_ref()).await {
             Ok(project_doc_paths) => {
                 paths.extend(project_doc_paths);

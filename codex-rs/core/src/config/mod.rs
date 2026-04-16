@@ -16,6 +16,7 @@ use crate::config_loader::project_trust_key;
 use crate::memories::memory_root;
 use crate::path_utils::normalize_for_native_workdir;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
+use crate::project_doc::GLOBAL_MEMORY_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS;
 use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
@@ -269,10 +270,13 @@ pub struct Config {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: bool,
 
-    /// User-provided instructions from AGENTS.md.
+    /// User-provided instructions from global AGENTS.md and MEMORY.md files.
     pub user_instructions: Option<String>,
 
-    /// Path to the global AGENTS file loaded into `user_instructions`.
+    /// Ordered global instruction sources loaded into `user_instructions`.
+    pub user_instructions_paths: Vec<AbsolutePathBuf>,
+
+    /// Primary path to a global instruction source loaded into `user_instructions`.
     pub user_instructions_path: Option<AbsolutePathBuf>,
 
     /// Base instructions override.
@@ -1451,10 +1455,16 @@ impl Config {
             network: network_requirements,
         } = config_layer_stack.requirements().clone();
 
-        let (user_instructions, user_instructions_path) =
+        let (user_instructions, user_instructions_path, user_instructions_paths) =
             Self::load_instructions(Some(&codex_home))
-                .map(|loaded| (Some(loaded.contents), Some(loaded.path)))
-                .unwrap_or((None, None));
+                .map(|loaded| {
+                    (
+                        Some(loaded.contents),
+                        loaded.paths.first().cloned(),
+                        loaded.paths,
+                    )
+                })
+                .unwrap_or((None, None, Vec::new()));
         let mut startup_warnings = Vec::new();
 
         // Destructure ConfigOverrides fully to ensure all overrides are applied.
@@ -2044,6 +2054,7 @@ impl Config {
             enforce_residency: enforce_residency.value,
             notify: cfg.notify,
             user_instructions,
+            user_instructions_paths,
             user_instructions_path,
             base_instructions,
             personality,
@@ -2222,19 +2233,42 @@ impl Config {
 
     fn load_instructions(codex_dir: Option<&AbsolutePathBuf>) -> Option<LoadedUserInstructions> {
         let base = codex_dir?;
+        let mut sections = Vec::new();
+        let mut paths = Vec::new();
+
         for candidate in [LOCAL_PROJECT_DOC_FILENAME, DEFAULT_PROJECT_DOC_FILENAME] {
             let path = base.join(candidate);
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                let trimmed = contents.trim();
-                if !trimmed.is_empty() {
-                    return Some(LoadedUserInstructions {
-                        contents: trimmed.to_string(),
-                        path,
-                    });
-                }
+            if let Some(contents) = Self::read_non_empty_instruction_file(&path) {
+                sections.push(contents);
+                paths.push(path);
+                break;
             }
         }
-        None
+
+        let memory_path = base.join(GLOBAL_MEMORY_DOC_FILENAME);
+        if let Some(contents) = Self::read_non_empty_instruction_file(&memory_path) {
+            if !sections.is_empty() {
+                sections.push("--- user-memory ---".to_string());
+            }
+            sections.push(contents);
+            paths.push(memory_path);
+        }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(LoadedUserInstructions {
+                contents: sections.join("\n\n"),
+                paths,
+            })
+        }
+    }
+
+    fn read_non_empty_instruction_file(path: &AbsolutePathBuf) -> Option<String> {
+        std::fs::read_to_string(path).ok().and_then(|contents| {
+            let trimmed = contents.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
     }
 
     /// If `path` is `Some`, attempts to read the file at the given path and
@@ -2310,7 +2344,7 @@ impl Config {
 
 struct LoadedUserInstructions {
     contents: String,
-    path: AbsolutePathBuf,
+    paths: Vec<AbsolutePathBuf>,
 }
 
 pub(crate) fn uses_deprecated_instructions_file(config_layer_stack: &ConfigLayerStack) -> bool {
