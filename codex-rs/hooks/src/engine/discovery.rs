@@ -62,14 +62,78 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
         };
 
         let super::config::HookEvents {
+            session_start,
+            session_resume,
+            session_end,
+            session_interrupted,
+            user_prompt_submit,
+            turn_start,
+            turn_complete,
+            turn_abort,
+            turn_error,
             pre_tool_use,
             post_tool_use,
-            session_start,
-            user_prompt_submit,
+            tool_error,
+            permission_request,
+            permission_denied,
+            approval_granted,
+            task_created,
+            task_started,
+            task_completed,
+            task_failed,
+            subagent_start,
+            subagent_complete,
+            subagent_escalation,
+            file_changed,
+            cwd_changed,
+            config_changed,
+            memory_updated,
+            skill_changed,
+            compaction_start,
+            compaction_complete,
+            context_truncated,
+            prompt_cache_hit,
+            prompt_cache_miss,
             stop,
         } = parsed.hooks;
 
         for (event_name, groups) in [
+            (
+                codex_protocol::protocol::HookEventName::SessionStart,
+                session_start,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SessionResume,
+                session_resume,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SessionEnd,
+                session_end,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SessionInterrupted,
+                session_interrupted,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::UserPromptSubmit,
+                user_prompt_submit,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::TurnStart,
+                turn_start,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::TurnComplete,
+                turn_complete,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::TurnAbort,
+                turn_abort,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::TurnError,
+                turn_error,
+            ),
             (
                 codex_protocol::protocol::HookEventName::PreToolUse,
                 pre_tool_use,
@@ -79,12 +143,88 @@ pub(crate) fn discover_handlers(config_layer_stack: Option<&ConfigLayerStack>) -
                 post_tool_use,
             ),
             (
-                codex_protocol::protocol::HookEventName::SessionStart,
-                session_start,
+                codex_protocol::protocol::HookEventName::ToolError,
+                tool_error,
             ),
             (
-                codex_protocol::protocol::HookEventName::UserPromptSubmit,
-                user_prompt_submit,
+                codex_protocol::protocol::HookEventName::PermissionRequest,
+                permission_request,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::PermissionDenied,
+                permission_denied,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::ApprovalGranted,
+                approval_granted,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::TaskCreated,
+                task_created,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::TaskStarted,
+                task_started,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::TaskCompleted,
+                task_completed,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::TaskFailed,
+                task_failed,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SubagentStart,
+                subagent_start,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SubagentComplete,
+                subagent_complete,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SubagentEscalation,
+                subagent_escalation,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::FileChanged,
+                file_changed,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::CwdChanged,
+                cwd_changed,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::ConfigChanged,
+                config_changed,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::MemoryUpdated,
+                memory_updated,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::SkillChanged,
+                skill_changed,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::CompactionStart,
+                compaction_start,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::CompactionComplete,
+                compaction_complete,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::ContextTruncated,
+                context_truncated,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::PromptCacheHit,
+                prompt_cache_hit,
+            ),
+            (
+                codex_protocol::protocol::HookEventName::PromptCacheMiss,
+                prompt_cache_miss,
             ),
             (codex_protocol::protocol::HookEventName::Stop, stop),
         ] {

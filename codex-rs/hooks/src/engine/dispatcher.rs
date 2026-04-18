@@ -30,13 +30,12 @@ pub(crate) fn select_handlers(
     handlers
         .iter()
         .filter(|handler| handler.event_name == event_name)
-        .filter(|handler| match event_name {
-            HookEventName::PreToolUse
-            | HookEventName::PostToolUse
-            | HookEventName::SessionStart => {
+        .filter(|handler| {
+            if event_supports_matcher(event_name) {
                 matches_matcher(handler.matcher.as_deref(), matcher_input)
+            } else {
+                true
             }
-            HookEventName::UserPromptSubmit | HookEventName::Stop => true,
         })
         .cloned()
         .collect()
@@ -107,12 +106,51 @@ pub(crate) fn completed_summary(
 
 fn scope_for_event(event_name: HookEventName) -> HookScope {
     match event_name {
-        HookEventName::SessionStart => HookScope::Thread,
-        HookEventName::PreToolUse
+        HookEventName::SessionStart
+        | HookEventName::SessionResume
+        | HookEventName::SessionEnd
+        | HookEventName::SessionInterrupted => HookScope::Thread,
+        HookEventName::TaskCreated
+        | HookEventName::TaskStarted
+        | HookEventName::TaskCompleted
+        | HookEventName::TaskFailed
+        | HookEventName::SubagentStart
+        | HookEventName::SubagentComplete
+        | HookEventName::SubagentEscalation => HookScope::Task,
+        HookEventName::UserPromptSubmit
+        | HookEventName::TurnStart
+        | HookEventName::TurnComplete
+        | HookEventName::TurnAbort
+        | HookEventName::TurnError
+        | HookEventName::PreToolUse
         | HookEventName::PostToolUse
-        | HookEventName::UserPromptSubmit
+        | HookEventName::ToolError
+        | HookEventName::PermissionRequest
+        | HookEventName::PermissionDenied
+        | HookEventName::ApprovalGranted
+        | HookEventName::FileChanged
+        | HookEventName::CwdChanged
+        | HookEventName::ConfigChanged
+        | HookEventName::MemoryUpdated
+        | HookEventName::SkillChanged
+        | HookEventName::CompactionStart
+        | HookEventName::CompactionComplete
+        | HookEventName::ContextTruncated
+        | HookEventName::PromptCacheHit
+        | HookEventName::PromptCacheMiss
         | HookEventName::Stop => HookScope::Turn,
     }
+}
+
+fn event_supports_matcher(event_name: HookEventName) -> bool {
+    matches!(
+        event_name,
+        HookEventName::SessionStart
+            | HookEventName::SessionResume
+            | HookEventName::PreToolUse
+            | HookEventName::PostToolUse
+            | HookEventName::ToolError
+    )
 }
 
 #[cfg(test)]

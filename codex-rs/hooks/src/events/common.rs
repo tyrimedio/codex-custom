@@ -100,10 +100,39 @@ pub(crate) fn matcher_pattern_for_event(
     matcher: Option<&str>,
 ) -> Option<&str> {
     match event_name {
-        HookEventName::PreToolUse | HookEventName::PostToolUse | HookEventName::SessionStart => {
-            matcher
-        }
-        HookEventName::UserPromptSubmit | HookEventName::Stop => None,
+        HookEventName::SessionStart
+        | HookEventName::SessionResume
+        | HookEventName::PreToolUse
+        | HookEventName::PostToolUse
+        | HookEventName::ToolError => matcher,
+        HookEventName::SessionEnd
+        | HookEventName::SessionInterrupted
+        | HookEventName::UserPromptSubmit
+        | HookEventName::TurnStart
+        | HookEventName::TurnComplete
+        | HookEventName::TurnAbort
+        | HookEventName::TurnError
+        | HookEventName::PermissionRequest
+        | HookEventName::PermissionDenied
+        | HookEventName::ApprovalGranted
+        | HookEventName::TaskCreated
+        | HookEventName::TaskStarted
+        | HookEventName::TaskCompleted
+        | HookEventName::TaskFailed
+        | HookEventName::SubagentStart
+        | HookEventName::SubagentComplete
+        | HookEventName::SubagentEscalation
+        | HookEventName::FileChanged
+        | HookEventName::CwdChanged
+        | HookEventName::ConfigChanged
+        | HookEventName::MemoryUpdated
+        | HookEventName::SkillChanged
+        | HookEventName::CompactionStart
+        | HookEventName::CompactionComplete
+        | HookEventName::ContextTruncated
+        | HookEventName::PromptCacheHit
+        | HookEventName::PromptCacheMiss
+        | HookEventName::Stop => None,
     }
 }
 
@@ -192,6 +221,10 @@ mod tests {
             matcher_pattern_for_event(HookEventName::Stop, Some("^done$")),
             None
         );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::TurnStart, Some("^turn$")),
+            None
+        );
     }
 
     #[test]
@@ -207,6 +240,14 @@ mod tests {
         assert_eq!(
             matcher_pattern_for_event(HookEventName::SessionStart, Some("startup|resume")),
             Some("startup|resume")
+        );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::SessionResume, Some("resume")),
+            Some("resume")
+        );
+        assert_eq!(
+            matcher_pattern_for_event(HookEventName::ToolError, Some("Bash")),
+            Some("Bash")
         );
     }
 }

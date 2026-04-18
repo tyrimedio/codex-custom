@@ -1606,10 +1606,38 @@ pub enum EventMsg {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEventName {
+    SessionStart,
+    SessionResume,
+    SessionEnd,
+    SessionInterrupted,
+    UserPromptSubmit,
+    TurnStart,
+    TurnComplete,
+    TurnAbort,
+    TurnError,
     PreToolUse,
     PostToolUse,
-    SessionStart,
-    UserPromptSubmit,
+    ToolError,
+    PermissionRequest,
+    PermissionDenied,
+    ApprovalGranted,
+    TaskCreated,
+    TaskStarted,
+    TaskCompleted,
+    TaskFailed,
+    SubagentStart,
+    SubagentComplete,
+    SubagentEscalation,
+    FileChanged,
+    CwdChanged,
+    ConfigChanged,
+    MemoryUpdated,
+    SkillChanged,
+    CompactionStart,
+    CompactionComplete,
+    ContextTruncated,
+    PromptCacheHit,
+    PromptCacheMiss,
     Stop,
 }
 
@@ -1633,6 +1661,7 @@ pub enum HookExecutionMode {
 pub enum HookScope {
     Thread,
     Turn,
+    Task,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

@@ -7,10 +7,38 @@
     },
     "HookEventName": {
       "enum": [
+        "sessionStart",
+        "sessionResume",
+        "sessionEnd",
+        "sessionInterrupted",
+        "userPromptSubmit",
+        "turnStart",
+        "turnComplete",
+        "turnAbort",
+        "turnError",
         "preToolUse",
         "postToolUse",
-        "sessionStart",
-        "userPromptSubmit",
+        "toolError",
+        "permissionRequest",
+        "permissionDenied",
+        "approvalGranted",
+        "taskCreated",
+        "taskStarted",
+        "taskCompleted",
+        "taskFailed",
+        "subagentStart",
+        "subagentComplete",
+        "subagentEscalation",
+        "fileChanged",
+        "cwdChanged",
+        "configChanged",
+        "memoryUpdated",
+        "skillChanged",
+        "compactionStart",
+        "compactionComplete",
+        "contextTruncated",
+        "promptCacheHit",
+        "promptCacheMiss",
         "stop"
       ],
       "type": "string"
@@ -140,7 +168,8 @@
     "HookScope": {
       "enum": [
         "thread",
-        "turn"
+        "turn",
+        "task"
       ],
       "type": "string"
     }

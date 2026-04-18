@@ -380,7 +380,39 @@ v2_enum_from_core!(
 
 v2_enum_from_core!(
     pub enum HookEventName from CoreHookEventName {
-        PreToolUse, PostToolUse, SessionStart, UserPromptSubmit, Stop
+        SessionStart,
+        SessionResume,
+        SessionEnd,
+        SessionInterrupted,
+        UserPromptSubmit,
+        TurnStart,
+        TurnComplete,
+        TurnAbort,
+        TurnError,
+        PreToolUse,
+        PostToolUse,
+        ToolError,
+        PermissionRequest,
+        PermissionDenied,
+        ApprovalGranted,
+        TaskCreated,
+        TaskStarted,
+        TaskCompleted,
+        TaskFailed,
+        SubagentStart,
+        SubagentComplete,
+        SubagentEscalation,
+        FileChanged,
+        CwdChanged,
+        ConfigChanged,
+        MemoryUpdated,
+        SkillChanged,
+        CompactionStart,
+        CompactionComplete,
+        ContextTruncated,
+        PromptCacheHit,
+        PromptCacheMiss,
+        Stop
     }
 );
 
@@ -398,7 +430,7 @@ v2_enum_from_core!(
 
 v2_enum_from_core!(
     pub enum HookScope from CoreHookScope {
-        Thread, Turn
+        Thread, Turn, Task
     }
 );
 

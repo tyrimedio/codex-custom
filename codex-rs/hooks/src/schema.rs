@@ -67,14 +67,70 @@ pub(crate) struct HookUniversalOutputWire {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub(crate) enum HookEventNameWire {
+    #[serde(rename = "SessionStart")]
+    SessionStart,
+    #[serde(rename = "SessionResume")]
+    SessionResume,
+    #[serde(rename = "SessionEnd")]
+    SessionEnd,
+    #[serde(rename = "SessionInterrupted")]
+    SessionInterrupted,
+    #[serde(rename = "UserPromptSubmit")]
+    UserPromptSubmit,
+    #[serde(rename = "TurnStart")]
+    TurnStart,
+    #[serde(rename = "TurnComplete")]
+    TurnComplete,
+    #[serde(rename = "TurnAbort")]
+    TurnAbort,
+    #[serde(rename = "TurnError")]
+    TurnError,
     #[serde(rename = "PreToolUse")]
     PreToolUse,
     #[serde(rename = "PostToolUse")]
     PostToolUse,
-    #[serde(rename = "SessionStart")]
-    SessionStart,
-    #[serde(rename = "UserPromptSubmit")]
-    UserPromptSubmit,
+    #[serde(rename = "ToolError")]
+    ToolError,
+    #[serde(rename = "PermissionRequest")]
+    PermissionRequest,
+    #[serde(rename = "PermissionDenied")]
+    PermissionDenied,
+    #[serde(rename = "ApprovalGranted")]
+    ApprovalGranted,
+    #[serde(rename = "TaskCreated")]
+    TaskCreated,
+    #[serde(rename = "TaskStarted")]
+    TaskStarted,
+    #[serde(rename = "TaskCompleted")]
+    TaskCompleted,
+    #[serde(rename = "TaskFailed")]
+    TaskFailed,
+    #[serde(rename = "SubagentStart")]
+    SubagentStart,
+    #[serde(rename = "SubagentComplete")]
+    SubagentComplete,
+    #[serde(rename = "SubagentEscalation")]
+    SubagentEscalation,
+    #[serde(rename = "FileChanged")]
+    FileChanged,
+    #[serde(rename = "CwdChanged")]
+    CwdChanged,
+    #[serde(rename = "ConfigChanged")]
+    ConfigChanged,
+    #[serde(rename = "MemoryUpdated")]
+    MemoryUpdated,
+    #[serde(rename = "SkillChanged")]
+    SkillChanged,
+    #[serde(rename = "CompactionStart")]
+    CompactionStart,
+    #[serde(rename = "CompactionComplete")]
+    CompactionComplete,
+    #[serde(rename = "ContextTruncated")]
+    ContextTruncated,
+    #[serde(rename = "PromptCacheHit")]
+    PromptCacheHit,
+    #[serde(rename = "PromptCacheMiss")]
+    PromptCacheMiss,
     #[serde(rename = "Stop")]
     Stop,
 }
