@@ -1,9 +1,14 @@
 use super::*;
+use crate::memories::PROJECT_MEMORY_AUTO_SECTION_BEGIN;
+use crate::memories::PROJECT_MEMORY_AUTO_SECTION_END;
+use crate::memories::ProjectMemoryTarget;
 use crate::memories::extensions::RemovedExtensionResource;
 use codex_models_manager::model_info::model_info_from_slug;
+use codex_protocol::ThreadId;
 use codex_state::Phase2InputSelection;
 use core_test_support::PathExt;
 use pretty_assertions::assert_eq;
+use std::path::PathBuf;
 use tempfile::tempdir;
 use tokio::fs as tokio_fs;
 
@@ -76,6 +81,7 @@ fn build_consolidation_prompt_includes_removed_extension_resources() {
         &memory_root,
         &Phase2InputSelection::default(),
         &removed_extension_resources,
+        &[],
     );
 
     assert!(prompt.contains("Memory extension resources removed by retention pruning:"));
@@ -84,6 +90,47 @@ fn build_consolidation_prompt_includes_removed_extension_resources() {
     assert!(prompt.contains("  - resources/2026-04-06T11-59-59-abcd-10min-old.md"));
     assert!(prompt.contains("  - resources/2026-04-07T12-00-00-abcd-10min-cutoff.md"));
     assert!(prompt.contains("extension-specific deletion diff"));
+}
+
+#[test]
+fn build_consolidation_prompt_includes_project_memory_targets_and_markers() {
+    let temp = tempdir().unwrap();
+    let memory_root = temp.path().join("memories");
+    let project_root = temp.path().join("repo");
+    let project_memory_file = project_root.join(".codex/MEMORY.md");
+    let project_memory_candidate = temp
+        .path()
+        .join("memories/project_facts/candidates/repo-facts.json");
+    let accepted_facts_file = temp.path().join("memories/project_facts/repo-facts.json");
+    let selected_thread_id = ThreadId::new();
+    let removed_thread_id = ThreadId::new();
+    let project_memory_targets = vec![ProjectMemoryTarget {
+        project_root,
+        memory_dir: PathBuf::from(project_memory_file.parent().unwrap()),
+        memory_file: project_memory_file.clone(),
+        candidate_file: project_memory_candidate.clone(),
+        facts_file: accepted_facts_file.clone(),
+        selected_thread_ids: vec![selected_thread_id],
+        removed_thread_ids: vec![removed_thread_id],
+    }];
+
+    let prompt = build_consolidation_prompt(
+        &memory_root,
+        &Phase2InputSelection::default(),
+        &[],
+        &project_memory_targets,
+    );
+
+    assert!(prompt.contains("Optional repo-local `.codex/MEMORY.md` maintenance targets:"));
+    assert!(prompt.contains(&project_memory_file.display().to_string()));
+    assert!(prompt.contains(&project_memory_candidate.display().to_string()));
+    assert!(prompt.contains(&accepted_facts_file.display().to_string()));
+    assert!(prompt.contains(&selected_thread_id.to_string()));
+    assert!(prompt.contains(&removed_thread_id.to_string()));
+    assert!(prompt.contains(PROJECT_MEMORY_AUTO_SECTION_BEGIN));
+    assert!(prompt.contains(PROJECT_MEMORY_AUTO_SECTION_END));
+    assert!(prompt.contains("\"schema_version\": 1"));
+    assert!(prompt.contains("Only write the listed `candidate_file` paths."));
 }
 
 #[tokio::test]

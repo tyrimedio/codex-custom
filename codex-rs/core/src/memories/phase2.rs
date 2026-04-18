@@ -3,16 +3,22 @@ use crate::agent::status::is_final as is_final_agent_status;
 use crate::codex::Session;
 use crate::codex::emit_subagent_session_started;
 use crate::config::Config;
+use crate::memories::ProjectMemoryTarget;
 use crate::memories::extensions::PendingExtensionResourceRemoval;
 use crate::memories::extensions::find_old_extension_resources;
 use crate::memories::extensions::remove_extension_resources;
 use crate::memories::memory_root;
 use crate::memories::metrics;
 use crate::memories::phase_two;
+use crate::memories::project_memory::apply_project_memory_updates;
+use crate::memories::project_memory::prepare_project_memory_candidates;
+use crate::memories::project_memory::project_fact_candidate_file;
+use crate::memories::project_memory::project_facts_store_file;
 use crate::memories::prompts::build_consolidation_prompt;
 use crate::memories::storage::rebuild_raw_memories_file_from_memories;
 use crate::memories::storage::rollout_summary_file_stem;
 use crate::memories::storage::sync_rollout_summaries_from_memories;
+use crate::project_doc::GLOBAL_MEMORY_DOC_FILENAME;
 use codex_config::Constrained;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
@@ -24,7 +30,11 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::user_input::UserInput;
 use codex_state::Stage1Output;
 use codex_state::StateRuntime;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -71,15 +81,7 @@ pub(super) async fn run(session: &Arc<Session>, config: Arc<Config>) {
         }
     };
 
-    // 2. Get the config for the agent
-    let Some(agent_config) = agent::get_config(config.clone()) else {
-        // If we can't get the config, we can't consolidate.
-        tracing::error!("failed to get agent config");
-        job::failed(session, db, &claim, "failed_sandbox_policy").await;
-        return;
-    };
-
-    // 3. Query the memories
+    // 2. Query the memories
     let selection = match db
         .get_phase2_input_selection(max_raw_memories, max_unused_days)
         .await
@@ -94,9 +96,27 @@ pub(super) async fn run(session: &Arc<Session>, config: Arc<Config>) {
     let raw_memories = selection.selected.to_vec();
     let artifact_memories = artifact_memories_for_phase2(&selection);
     let new_watermark = get_watermark(claim.watermark, &raw_memories);
+    let project_memory_targets = match prepare_project_memory_targets(
+        collect_project_memory_targets(&selection, &config.codex_home),
+    )
+    .await
+    {
+        Ok(targets) => targets,
+        Err(err) => {
+            tracing::error!("failed to prepare project memory candidates: {err}");
+            job::failed(
+                session,
+                db,
+                &claim,
+                "failed_prepare_project_memory_candidates",
+            )
+            .await;
+            return;
+        }
+    };
 
-    // 4. Update the file system by syncing the raw memories with the one extracted from DB at
-    //    step 3
+    // 3. Update the file system by syncing the raw memories with the one extracted from DB at
+    //    step 2
     // [`rollout_summaries/`]
     if let Err(err) =
         sync_rollout_summaries_from_memories(&root, &artifact_memories, artifact_memories.len())
@@ -120,7 +140,10 @@ pub(super) async fn run(session: &Arc<Session>, config: Arc<Config>) {
         .iter()
         .map(|resource| resource.removed.clone())
         .collect::<Vec<_>>();
-    if raw_memories.is_empty() && pending_extension_resource_removals.is_empty() {
+    if raw_memories.is_empty()
+        && selection.removed.is_empty()
+        && pending_extension_resource_removals.is_empty()
+    {
         // We check only after sync of the file system.
         job::succeed(
             session,
@@ -134,8 +157,19 @@ pub(super) async fn run(session: &Arc<Session>, config: Arc<Config>) {
         return;
     }
 
-    // 5. Spawn the agent
-    let prompt = agent::get_prompt(config, &selection, &removed_extension_resources);
+    // 4. Spawn the agent
+    let prompt = agent::get_prompt(
+        config.clone(),
+        &selection,
+        &removed_extension_resources,
+        &project_memory_targets,
+    );
+    let Some(agent_config) = agent::get_config(config, &project_memory_targets) else {
+        // If we can't get the config, we can't consolidate.
+        tracing::error!("failed to get agent config");
+        job::failed(session, db, &claim, "failed_sandbox_policy").await;
+        return;
+    };
     let source = SessionSource::SubAgent(SubAgentSource::MemoryConsolidation);
     let thread_id = match session
         .services
@@ -172,18 +206,19 @@ pub(super) async fn run(session: &Arc<Session>, config: Arc<Config>) {
         warn!("failed to load memory consolidation thread config for analytics: {thread_id}");
     }
 
-    // 6. Spawn the agent handler.
+    // 5. Spawn the agent handler.
     agent::handle(
         session,
         claim,
         new_watermark,
         raw_memories.clone(),
         pending_extension_resource_removals,
+        project_memory_targets,
         thread_id,
         phase_two_e2e_timer,
     );
 
-    // 7. Metrics and logs.
+    // 6. Metrics and logs.
     let counters = Counters {
         input: raw_memories.len() as i64,
     };
@@ -204,6 +239,119 @@ fn artifact_memories_for_phase2(
         }
     }
     memories
+}
+
+fn collect_project_memory_targets(
+    selection: &codex_state::Phase2InputSelection,
+    codex_home: &AbsolutePathBuf,
+) -> Vec<ProjectMemoryTarget> {
+    let global_memory_root = memory_root(codex_home);
+    let removed_thread_ids = selection
+        .removed
+        .iter()
+        .map(|item| item.thread_id)
+        .collect::<HashSet<_>>();
+    let mut targets: BTreeMap<PathBuf, ProjectMemoryTarget> = BTreeMap::new();
+
+    for memory in &selection.selected {
+        add_project_memory_target(
+            &mut targets,
+            memory,
+            /*removed*/ false,
+            &global_memory_root,
+            codex_home,
+        );
+    }
+    for memory in &selection.previous_selected {
+        if removed_thread_ids.contains(&memory.thread_id) {
+            add_project_memory_target(
+                &mut targets,
+                memory,
+                /*removed*/ true,
+                &global_memory_root,
+                codex_home,
+            );
+        }
+    }
+
+    targets
+        .into_values()
+        .map(|mut target| {
+            dedup_and_sort_thread_ids(&mut target.selected_thread_ids);
+            dedup_and_sort_thread_ids(&mut target.removed_thread_ids);
+            target
+        })
+        .collect()
+}
+
+fn dedup_and_sort_thread_ids(thread_ids: &mut Vec<ThreadId>) {
+    let mut seen = HashSet::new();
+    thread_ids.retain(|thread_id| seen.insert(*thread_id));
+    thread_ids.sort_unstable_by_key(|thread_id| thread_id.to_string());
+}
+
+fn add_project_memory_target(
+    targets: &mut BTreeMap<PathBuf, ProjectMemoryTarget>,
+    memory: &Stage1Output,
+    removed: bool,
+    global_memory_root: &Path,
+    codex_home: &AbsolutePathBuf,
+) {
+    let Some(project_root) = resolve_project_memory_root(&memory.cwd) else {
+        return;
+    };
+    if !project_root.is_dir() || project_root.starts_with(codex_home.as_path()) {
+        return;
+    }
+
+    let memory_dir = project_root.join(".codex");
+    let memory_file = memory_dir.join(GLOBAL_MEMORY_DOC_FILENAME);
+    let candidate_file = project_fact_candidate_file(global_memory_root, &project_root);
+    let facts_file = project_facts_store_file(global_memory_root, &project_root);
+    let entry = targets
+        .entry(project_root.clone())
+        .or_insert_with(|| ProjectMemoryTarget {
+            project_root: project_root.clone(),
+            memory_dir,
+            memory_file,
+            candidate_file,
+            facts_file,
+            selected_thread_ids: Vec::new(),
+            removed_thread_ids: Vec::new(),
+        });
+
+    if removed {
+        entry.removed_thread_ids.push(memory.thread_id);
+    } else {
+        entry.selected_thread_ids.push(memory.thread_id);
+    }
+}
+
+fn resolve_project_memory_root(cwd: &Path) -> Option<PathBuf> {
+    let base = if cwd.is_dir() { cwd } else { cwd.parent()? };
+    let mut dir = base.to_path_buf();
+
+    loop {
+        if dir.join(".git").exists() {
+            return Some(canonicalize_or_raw(&dir));
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    Some(canonicalize_or_raw(base))
+}
+
+fn canonicalize_or_raw(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+async fn prepare_project_memory_targets(
+    targets: Vec<ProjectMemoryTarget>,
+) -> std::io::Result<Vec<ProjectMemoryTarget>> {
+    prepare_project_memory_candidates(&targets).await?;
+    Ok(targets)
 }
 
 mod job {
@@ -292,7 +440,10 @@ mod job {
 mod agent {
     use super::*;
 
-    pub(super) fn get_config(config: Arc<Config>) -> Option<Config> {
+    pub(super) fn get_config(
+        config: Arc<Config>,
+        _project_memory_targets: &[ProjectMemoryTarget],
+    ) -> Option<Config> {
         let root = memory_root(&config.codex_home);
         let mut agent_config = config.as_ref().clone();
 
@@ -338,9 +489,15 @@ mod agent {
         config: Arc<Config>,
         selection: &codex_state::Phase2InputSelection,
         removed_extension_resources: &[crate::memories::extensions::RemovedExtensionResource],
+        project_memory_targets: &[ProjectMemoryTarget],
     ) -> Vec<UserInput> {
         let root = memory_root(&config.codex_home);
-        let prompt = build_consolidation_prompt(&root, selection, removed_extension_resources);
+        let prompt = build_consolidation_prompt(
+            &root,
+            selection,
+            removed_extension_resources,
+            project_memory_targets,
+        );
         vec![UserInput::Text {
             text: prompt,
             text_elements: vec![],
@@ -354,6 +511,7 @@ mod agent {
         new_watermark: i64,
         selected_outputs: Vec<codex_state::Stage1Output>,
         pending_extension_resource_removals: Vec<PendingExtensionResourceRemoval>,
+        project_memory_targets: Vec<ProjectMemoryTarget>,
         thread_id: ThreadId,
         phase_two_e2e_timer: Option<codex_otel::Timer>,
     ) {
@@ -389,6 +547,11 @@ mod agent {
             if matches!(final_status, AgentStatus::Completed(_)) {
                 if let Some(token_usage) = agent_control.get_total_token_usage(thread_id).await {
                     emit_token_usage_metrics(&session, &token_usage);
+                }
+                if let Err(err) = apply_project_memory_updates(&project_memory_targets).await {
+                    tracing::error!("failed to apply project memory updates: {err}");
+                    job::failed(&session, &db, &claim, "failed_apply_project_memory_updates").await;
+                    return;
                 }
                 if job::succeed(
                     &session,

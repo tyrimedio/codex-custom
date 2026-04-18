@@ -232,6 +232,51 @@ LEFT JOIN jobs
         Ok(claimed)
     }
 
+    /// Attempts to claim a stage-1 job for one specific thread immediately.
+    ///
+    /// Unlike [`Self::claim_stage1_jobs_for_startup`], this bypasses the idle
+    /// and age-window scan and evaluates only the provided thread. This is
+    /// used for post-turn memory updates where the just-finished root thread
+    /// should be processed right away.
+    pub async fn claim_stage1_job_for_thread(
+        &self,
+        thread_id: ThreadId,
+        worker_id: ThreadId,
+        lease_seconds: i64,
+        max_running_jobs: usize,
+    ) -> anyhow::Result<Option<Stage1JobClaim>> {
+        let Some(thread) = self.get_thread(thread_id).await? else {
+            return Ok(None);
+        };
+        let Some(memory_mode) = self.get_thread_memory_mode(thread_id).await? else {
+            return Ok(None);
+        };
+        if memory_mode != "enabled" {
+            return Ok(None);
+        }
+
+        let claim = self
+            .try_claim_stage1_job(
+                thread_id,
+                worker_id,
+                thread.updated_at.timestamp(),
+                lease_seconds,
+                max_running_jobs.max(1),
+            )
+            .await?;
+
+        Ok(match claim {
+            Stage1JobClaimOutcome::Claimed { ownership_token } => Some(Stage1JobClaim {
+                thread,
+                ownership_token,
+            }),
+            Stage1JobClaimOutcome::SkippedUpToDate
+            | Stage1JobClaimOutcome::SkippedRunning
+            | Stage1JobClaimOutcome::SkippedRetryBackoff
+            | Stage1JobClaimOutcome::SkippedRetryExhausted => None,
+        })
+    }
+
     /// Lists the most recent non-empty stage-1 outputs for global consolidation.
     ///
     /// Query behavior:
@@ -1791,6 +1836,69 @@ mod tests {
 
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].thread.id, enabled_thread_id);
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn claim_stage1_job_for_thread_claims_current_thread_without_idle_wait() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+
+        let now = Utc::now();
+        let thread_id = ThreadId::from_string(&Uuid::new_v4().to_string()).expect("thread id");
+        let worker_id = ThreadId::from_string(&Uuid::new_v4().to_string()).expect("worker id");
+
+        let mut thread = test_thread_metadata(&codex_home, thread_id, codex_home.join("current"));
+        thread.created_at = now;
+        thread.updated_at = now;
+        runtime.upsert_thread(&thread).await.expect("upsert thread");
+
+        let claim = runtime
+            .claim_stage1_job_for_thread(
+                thread_id, worker_id, /*lease_seconds*/ 3600, /*max_running_jobs*/ 8,
+            )
+            .await
+            .expect("claim current thread");
+
+        let claim = claim.expect("current thread should be claimable immediately");
+        assert_eq!(claim.thread.id, thread_id);
+        assert!(!claim.ownership_token.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn claim_stage1_job_for_thread_skips_disabled_memory_mode() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+
+        let now = Utc::now();
+        let thread_id = ThreadId::from_string(&Uuid::new_v4().to_string()).expect("thread id");
+        let worker_id = ThreadId::from_string(&Uuid::new_v4().to_string()).expect("worker id");
+
+        let mut thread = test_thread_metadata(&codex_home, thread_id, codex_home.join("current"));
+        thread.created_at = now;
+        thread.updated_at = now;
+        runtime.upsert_thread(&thread).await.expect("upsert thread");
+        sqlx::query("UPDATE threads SET memory_mode = 'disabled' WHERE id = ?")
+            .bind(thread_id.to_string())
+            .execute(runtime.pool.as_ref())
+            .await
+            .expect("disable thread memory mode");
+
+        let claim = runtime
+            .claim_stage1_job_for_thread(
+                thread_id, worker_id, /*lease_seconds*/ 3600, /*max_running_jobs*/ 8,
+            )
+            .await
+            .expect("claim disabled current thread");
+
+        assert!(claim.is_none());
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }

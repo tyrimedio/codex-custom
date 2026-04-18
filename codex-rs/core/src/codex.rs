@@ -5606,6 +5606,12 @@ mod handlers {
             state.session_configuration.session_source.clone()
         };
 
+        crate::memories::start_memories_current_thread_task(
+            sess,
+            Arc::clone(config),
+            &session_source,
+            None,
+        );
         crate::memories::start_memories_startup_task(sess, Arc::clone(config), &session_source);
 
         sess.send_event_raw(Event {

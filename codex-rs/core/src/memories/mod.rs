@@ -1,13 +1,14 @@
-//! Memory subsystem for startup extraction and consolidation.
+//! Memory subsystem for startup and post-turn extraction plus consolidation.
 //!
-//! The startup memory pipeline is split into two phases:
-//! - Phase 1: select rollouts, extract stage-1 raw memories, persist stage-1 outputs, and enqueue consolidation.
+//! The memory pipeline is split into two phases:
+//! - Phase 1: extract stage-1 raw memories, persist stage-1 outputs, and enqueue consolidation.
 //! - Phase 2: claim a global consolidation lock, materialize consolidation inputs, and dispatch one consolidation agent.
 
 pub(crate) mod citations;
 mod control;
 mod phase1;
 mod phase2;
+mod project_memory;
 pub(crate) mod prompts;
 mod start;
 mod storage;
@@ -15,6 +16,7 @@ mod storage;
 mod tests;
 pub(crate) mod usage;
 
+use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
 
 pub use control::clear_memory_roots_contents;
@@ -22,7 +24,22 @@ pub use control::clear_memory_roots_contents;
 /// This is the single entrypoint that `codex` uses to trigger memory startup.
 ///
 /// This is the entry point to read and understand this module.
+pub(crate) use start::start_memories_current_thread_task;
 pub(crate) use start::start_memories_startup_task;
+
+pub(super) const PROJECT_MEMORY_AUTO_SECTION_BEGIN: &str = "<!-- BEGIN CODEX AUTO MEMORY -->";
+pub(super) const PROJECT_MEMORY_AUTO_SECTION_END: &str = "<!-- END CODEX AUTO MEMORY -->";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ProjectMemoryTarget {
+    pub(super) project_root: PathBuf,
+    pub(super) memory_dir: PathBuf,
+    pub(super) memory_file: PathBuf,
+    pub(super) candidate_file: PathBuf,
+    pub(super) facts_file: PathBuf,
+    pub(super) selected_thread_ids: Vec<ThreadId>,
+    pub(super) removed_thread_ids: Vec<ThreadId>,
+}
 
 mod artifacts {
     pub(super) const EXTENSIONS_SUBDIR: &str = "memories_extensions";

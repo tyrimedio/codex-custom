@@ -1,6 +1,9 @@
 # Memories Pipeline (Core)
 
-This module runs a startup memory pipeline for eligible sessions.
+This module runs two memory pipelines for eligible sessions:
+
+- a startup pipeline for catch-up / background consolidation across prior threads
+- an immediate current-thread pipeline after completed root turns
 
 ## Prompt Templates
 
@@ -16,21 +19,33 @@ Memory prompt templates live under `codex-rs/core/templates/memories/`.
 
 ## When it runs
 
-The pipeline is triggered when a root session starts, and only if:
+Both pipelines are root-session only and run only if:
 
 - the session is not ephemeral
 - the memory feature is enabled
 - the session is not a sub-agent session
 - the state DB is available
 
-It runs asynchronously in the background and executes two phases in order: Phase 1, then Phase 2.
+Trigger points:
+
+- session startup:
+  - prune old stage-1 outputs
+  - run Phase 1 startup selection
+  - run Phase 2 consolidation
+- completed root turn:
+  - run Phase 1 immediately for the current thread
+  - run Phase 2 consolidation
+
+Both paths run asynchronously in the background and execute Phase 1 before Phase 2.
 
 ## Phase 1: Rollout Extraction (per-thread)
 
 Phase 1 finds recent eligible rollouts and extracts a structured memory from each one.
 
+Startup selection:
+
 Eligible rollouts are selected from the state DB using startup claim rules. In practice this means
-the pipeline only considers rollouts that are:
+the startup path only considers rollouts that are:
 
 - from allowed interactive session sources
 - within the configured age window
@@ -40,8 +55,11 @@ the pipeline only considers rollouts that are:
 
 What it does:
 
-- claims a bounded set of rollout jobs from the state DB (startup claim)
+- on startup, claims a bounded set of rollout jobs from the state DB
+- after a completed root turn, claims only the current thread immediately
 - filters rollout content down to memory-relevant response items
+- for immediate post-turn updates, truncates the rollout at the just-finished
+  `TurnComplete` marker so extraction does not race with the next turn
 - sends each rollout to a model (in parallel, with a concurrency cap)
 - expects structured output containing:
   - a detailed `raw_memory`
@@ -83,6 +101,9 @@ What it does:
 - syncs local memory artifacts under the memories root:
   - `raw_memories.md` (merged raw memories, latest first)
   - `rollout_summaries/` (one summary file per retained rollout)
+- prepares repo-local structured memory artifacts under:
+  - `project_facts/<project-slug>-<hash>.json` (accepted durable facts store)
+  - `project_facts/candidates/<project-slug>-<hash>.json` (phase-2 candidate facts input)
 - prunes stale rollout summaries that are no longer retained
 - finds old resource files from memory extensions under
   `memories_extensions/<extension>/resources/` for extension directories that
@@ -97,9 +118,17 @@ If there is input, it then:
   selection versus the last successful Phase 2 selection (`added`,
   `retained`, `removed`)
 - includes old extension resource paths in the prompt diff
+- when repo-local memory targets exist, instructs the consolidation agent to write
+  JSON fact candidates for each repo instead of editing repo files directly
 - runs it with no approvals, no network, and local write access only
 - disables collab for that agent (to prevent recursive delegation)
 - watches the agent status and heartbeats the global job lease while it runs
+- after a successful consolidation agent run:
+  - validates and normalizes repo-local fact candidates in Rust
+  - merges them into the per-project accepted-facts stores under
+    `memories/project_facts/`
+  - removes facts supported only by removed thread ids
+  - renders repo-local `.codex/MEMORY.md` generated sections from accepted facts only
 - marks the phase-2 job success/failure in the state DB when the agent finishes
 - prunes old extension resource files after the consolidation agent completes
   and the successful Phase 2 job is recorded

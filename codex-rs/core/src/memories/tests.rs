@@ -420,10 +420,17 @@ mod phase2 {
     use crate::codex::make_session_and_context;
     use crate::config::Config;
     use crate::config::test_config;
+    use crate::memories::PROJECT_MEMORY_AUTO_SECTION_BEGIN;
+    use crate::memories::PROJECT_MEMORY_AUTO_SECTION_END;
+    use crate::memories::ProjectMemoryTarget;
     use crate::memories::memory_root;
     use crate::memories::phase2;
+    use crate::memories::project_memory::apply_project_memory_updates;
+    use crate::memories::project_memory::project_fact_candidate_file;
+    use crate::memories::project_memory::project_facts_store_file;
     use crate::memories::raw_memories_file;
     use crate::memories::rollout_summaries_dir;
+    use crate::project_doc::GLOBAL_MEMORY_DOC_FILENAME;
     use chrono::Duration as ChronoDuration;
     use chrono::Utc;
     use codex_config::Constrained;
@@ -433,13 +440,19 @@ mod phase2 {
     use codex_protocol::protocol::Op;
     use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::user_input::UserInput;
     use codex_state::Phase2JobClaimOutcome;
     use codex_state::Stage1Output;
     use codex_state::ThreadMetadataBuilder;
+    use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    fn thread_id(value: &str) -> ThreadId {
+        ThreadId::from_string(value).expect("valid thread id")
+    }
 
     fn stage1_output_with_source_updated_at(source_updated_at: i64) -> Stage1Output {
         Stage1Output {
@@ -504,17 +517,19 @@ mod phase2 {
         }
 
         async fn seed_stage1_output(&self, source_updated_at: i64) {
+            self.seed_stage1_output_in_cwd(source_updated_at, self.config.cwd.to_path_buf())
+                .await;
+        }
+
+        async fn seed_stage1_output_in_cwd(&self, source_updated_at: i64, cwd: PathBuf) {
             let thread_id = ThreadId::new();
             let mut metadata_builder = ThreadMetadataBuilder::new(
                 thread_id,
-                self.config
-                    .codex_home
-                    .join(format!("rollout-{thread_id}.jsonl"))
-                    .to_path_buf(),
+                cwd.join(format!("rollout-{thread_id}.jsonl")),
                 Utc::now(),
                 SessionSource::Cli,
             );
-            metadata_builder.cwd = self.config.cwd.to_path_buf();
+            metadata_builder.cwd = cwd;
             metadata_builder.model_provider = Some(self.config.model_provider_id.clone());
             let metadata = metadata_builder.build(&self.config.model_provider_id);
 
@@ -569,6 +584,19 @@ mod phase2 {
                 .into_iter()
                 .filter(|(_, op)| matches!(op, Op::UserInput { .. }))
                 .count()
+        }
+
+        fn first_user_input_text(&self) -> Option<String> {
+            self.manager
+                .captured_ops()
+                .into_iter()
+                .find_map(|(_, op)| match op {
+                    Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
+                        UserInput::Text { text, .. } => Some(text),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
         }
     }
 
@@ -729,6 +757,227 @@ mod phase2 {
         pretty_assertions::assert_eq!(memory_mode.as_deref(), Some("disabled"));
 
         harness.shutdown_threads().await;
+    }
+
+    #[tokio::test]
+    async fn dispatch_includes_repo_memory_targets_in_prompt_and_writable_roots() {
+        let harness = DispatchHarness::new().await;
+        let repo_dir = tempfile::tempdir().expect("create temp repo dir");
+        let repo_root = repo_dir.path().join("demo-repo");
+        let nested_cwd = repo_root.join("apps/web");
+        tokio::fs::create_dir_all(repo_root.join(".git"))
+            .await
+            .expect("create git marker");
+        tokio::fs::create_dir_all(&nested_cwd)
+            .await
+            .expect("create nested cwd");
+        harness
+            .seed_stage1_output_in_cwd(Utc::now().timestamp(), nested_cwd.clone())
+            .await;
+
+        phase2::run(&harness.session, Arc::clone(&harness.config)).await;
+
+        pretty_assertions::assert_eq!(harness.user_input_ops_count(), 1);
+        let project_memory_dir = repo_root.join(".codex");
+        assert!(
+            !tokio::fs::try_exists(&project_memory_dir)
+                .await
+                .expect("check project memory dir existence"),
+            "phase2 should not pre-write the repo-local .codex directory before merging drafts"
+        );
+        let canonical_repo_root =
+            std::fs::canonicalize(&repo_root).unwrap_or_else(|_| repo_root.clone());
+        let canonical_project_memory_dir = canonical_repo_root.join(".codex");
+        let canonical_project_memory_file =
+            canonical_project_memory_dir.join(GLOBAL_MEMORY_DOC_FILENAME);
+        let project_memory_candidate = project_fact_candidate_file(
+            memory_root(&harness.config.codex_home).as_path(),
+            canonical_repo_root.as_path(),
+        );
+        let project_facts_store = project_facts_store_file(
+            memory_root(&harness.config.codex_home).as_path(),
+            canonical_repo_root.as_path(),
+        );
+        let prompt = harness
+            .first_user_input_text()
+            .expect("consolidation prompt should be captured");
+        assert!(
+            prompt.contains(&canonical_project_memory_file.display().to_string()),
+            "consolidation prompt should list the repo-local MEMORY target"
+        );
+        assert!(
+            prompt.contains(&project_memory_candidate.display().to_string()),
+            "consolidation prompt should list the project-memory candidate path"
+        );
+        assert!(
+            prompt.contains(&project_facts_store.display().to_string()),
+            "consolidation prompt should list the accepted project-facts store path"
+        );
+        assert!(
+            prompt.contains("\"schema_version\": 1"),
+            "consolidation prompt should describe the candidate JSON schema"
+        );
+        assert!(
+            prompt.contains(PROJECT_MEMORY_AUTO_SECTION_BEGIN),
+            "consolidation prompt should mention the generated section begin marker"
+        );
+        assert!(
+            prompt.contains(PROJECT_MEMORY_AUTO_SECTION_END),
+            "consolidation prompt should mention the generated section end marker"
+        );
+
+        let thread_ids = harness.manager.list_thread_ids().await;
+        pretty_assertions::assert_eq!(thread_ids.len(), 1);
+        let thread_id = thread_ids[0];
+        let subagent = harness
+            .manager
+            .get_thread(thread_id)
+            .await
+            .expect("get consolidation thread");
+        let config_snapshot = subagent.config_snapshot().await;
+        match config_snapshot.sandbox_policy {
+            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
+                assert!(
+                    writable_roots
+                        .iter()
+                        .any(|root| root.as_path() == harness.config.codex_home.as_path()),
+                    "consolidation subagent should have codex_home as writable root"
+                );
+                assert!(
+                    writable_roots
+                        .iter()
+                        .all(|root| root.as_path() != canonical_project_memory_dir.as_path()),
+                    "consolidation subagent should not get direct repo-local write access"
+                );
+            }
+            other => panic!("unexpected sandbox policy: {other:?}"),
+        }
+
+        harness.shutdown_threads().await;
+    }
+
+    #[tokio::test]
+    async fn apply_project_memory_updates_merges_generated_section_into_repo_memory_file() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let global_memory_root = temp.path().join("memories");
+        let repo_root = temp.path().join("demo-repo");
+        let memory_dir = repo_root.join(".codex");
+        let memory_file = memory_dir.join(GLOBAL_MEMORY_DOC_FILENAME);
+        let candidate_file = project_fact_candidate_file(&global_memory_root, &repo_root);
+        let facts_file = project_facts_store_file(&global_memory_root, &repo_root);
+        tokio::fs::create_dir_all(candidate_file.parent().expect("candidate parent"))
+            .await
+            .expect("create candidate dir");
+        tokio::fs::create_dir_all(&memory_dir)
+            .await
+            .expect("create repo memory dir");
+        let selected_thread_id = thread_id("00000000-0000-7000-8000-000000000031");
+        let removed_thread_id = thread_id("00000000-0000-7000-8000-000000000032");
+        tokio::fs::write(
+            &memory_file,
+            format!(
+                "Manual repo note\n\n{PROJECT_MEMORY_AUTO_SECTION_BEGIN}\nOld auto memory\n{PROJECT_MEMORY_AUTO_SECTION_END}\n\nManual footer\n"
+            ),
+        )
+        .await
+        .expect("write existing repo memory");
+        tokio::fs::write(
+            &facts_file,
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "project_root": repo_root.clone(),
+                "facts": [
+                    {
+                        "category": "pitfalls",
+                        "fact": "Remove me",
+                        "details": ["Only supported by removed thread."],
+                        "evidence_thread_ids": [removed_thread_id],
+                    }
+                ]
+            }))
+            .expect("serialize existing facts"),
+        )
+        .await
+        .expect("write existing project facts");
+        tokio::fs::write(
+            &candidate_file,
+            serde_json::to_string_pretty(&json!({
+                "schema_version": 1,
+                "facts": [
+                    {
+                        "category": "tooling",
+                        "fact": "Use pnpm instead of npm.",
+                        "details": ["Run `pnpm test --filter web` for targeted checks."],
+                        "evidence_thread_ids": [selected_thread_id],
+                    },
+                    {
+                        "category": "architecture",
+                        "fact": "Tests live under apps/web.",
+                        "details": [],
+                        "evidence_thread_ids": [selected_thread_id],
+                    }
+                ]
+            }))
+            .expect("serialize candidate facts"),
+        )
+        .await
+        .expect("write project memory candidate");
+
+        let target = ProjectMemoryTarget {
+            project_root: repo_root.clone(),
+            memory_dir,
+            memory_file: memory_file.clone(),
+            candidate_file: candidate_file.clone(),
+            facts_file: facts_file.clone(),
+            selected_thread_ids: vec![selected_thread_id],
+            removed_thread_ids: vec![removed_thread_id],
+        };
+
+        apply_project_memory_updates(&[target])
+            .await
+            .expect("apply project memory updates");
+
+        let updated = tokio::fs::read_to_string(&memory_file)
+            .await
+            .expect("read updated repo memory");
+        pretty_assertions::assert_eq!(
+            updated,
+            format!(
+                "Manual repo note\n\n{PROJECT_MEMORY_AUTO_SECTION_BEGIN}\n## Codex Auto Memory\n\n### Architecture\n- Tests live under apps/web.\n\n### Tooling\n- Use pnpm instead of npm.\n  - Run `pnpm test --filter web` for targeted checks.\n{PROJECT_MEMORY_AUTO_SECTION_END}\n\nManual footer\n"
+            )
+        );
+        let stored_facts = tokio::fs::read_to_string(&facts_file)
+            .await
+            .expect("read accepted project facts");
+        let stored_facts_json: serde_json::Value =
+            serde_json::from_str(&stored_facts).expect("parse accepted facts json");
+        pretty_assertions::assert_eq!(
+            stored_facts_json,
+            json!({
+                "schema_version": 1,
+                "project_root": repo_root,
+                "facts": [
+                    {
+                        "category": "architecture",
+                        "fact": "Tests live under apps/web.",
+                        "details": [],
+                        "evidence_thread_ids": [selected_thread_id],
+                    },
+                    {
+                        "category": "tooling",
+                        "fact": "Use pnpm instead of npm.",
+                        "details": ["Run `pnpm test --filter web` for targeted checks."],
+                        "evidence_thread_ids": [selected_thread_id],
+                    }
+                ]
+            })
+        );
+        assert!(
+            !tokio::fs::try_exists(&candidate_file)
+                .await
+                .expect("check candidate cleanup"),
+            "project memory candidates should be removed after applying"
+        );
     }
 
     #[tokio::test]

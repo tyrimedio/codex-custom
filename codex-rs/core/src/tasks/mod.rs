@@ -408,16 +408,19 @@ impl Session {
 
         let mut pending_input = Vec::<ResponseInputItem>::new();
         let mut should_clear_active_turn = false;
+        let mut completed_task_kind = None;
         let mut token_usage_at_turn_start = None;
         let mut turn_tool_calls = 0_u64;
         let turn_state = {
             let mut active = self.active_turn.lock().await;
             if let Some(at) = active.as_mut()
-                && at.remove_task(&turn_context.sub_id)
+                && let Some(task) = at.tasks.get(&turn_context.sub_id)
             {
-                should_clear_active_turn = true;
+                completed_task_kind = Some(task.kind);
+                let should_remove = at.remove_task(&turn_context.sub_id);
+                should_clear_active_turn = should_remove;
                 let turn_state = Arc::clone(&at.turn_state);
-                if should_clear_active_turn {
+                if should_remove {
                     *active = None;
                 }
                 Some(turn_state)
@@ -542,6 +545,15 @@ impl Session {
             duration_ms,
         });
         self.send_event(turn_context.as_ref(), event).await;
+
+        if matches!(completed_task_kind, Some(TaskKind::Regular)) {
+            crate::memories::start_memories_current_thread_task(
+                self,
+                turn_context.config.clone(),
+                &turn_context.session_source,
+                Some(turn_context.sub_id.clone()),
+            );
+        }
 
         if should_clear_active_turn {
             let session = Arc::clone(self);

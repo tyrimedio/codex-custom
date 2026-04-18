@@ -1,13 +1,16 @@
 use super::JobOutcome;
 use super::JobResult;
 use super::aggregate_stats;
+use super::job::rollout_items_for_stage_one;
 use super::job::serialize_filtered_rollout_response_items;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TurnCompleteEvent;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -153,4 +156,64 @@ fn count_outcomes_keeps_usage_empty_when_no_job_reports_it() {
 
     assert_eq!(counts.claimed, 2);
     assert_eq!(counts.total_token_usage, None);
+}
+
+#[test]
+fn rollout_items_for_stage_one_stops_at_requested_turn_completion() {
+    let before = RolloutItem::ResponseItem(ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "before".to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+    });
+    let target_complete = RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+        turn_id: "turn-1".to_string(),
+        last_agent_message: Some("done".to_string()),
+        completed_at: Some(1),
+        duration_ms: Some(10),
+    }));
+    let after = RolloutItem::ResponseItem(ResponseItem::Message {
+        id: None,
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "after".to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+    });
+    let items = vec![before.clone(), target_complete.clone(), after];
+
+    let truncated =
+        rollout_items_for_stage_one(&items, Some("turn-1")).expect("truncate at target turn");
+
+    assert_eq!(truncated.len(), 2);
+    assert!(matches!(
+        &truncated[0],
+        RolloutItem::ResponseItem(ResponseItem::Message { role, .. }) if role == "user"
+    ));
+    assert!(matches!(
+        &truncated[1],
+        RolloutItem::EventMsg(EventMsg::TurnComplete(event)) if event.turn_id == "turn-1"
+    ));
+}
+
+#[test]
+fn rollout_items_for_stage_one_errors_when_turn_completion_is_missing() {
+    let items = vec![RolloutItem::ResponseItem(ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "before".to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+    })];
+
+    let err =
+        rollout_items_for_stage_one(&items, Some("missing-turn")).expect_err("missing cutoff");
+
+    assert!(err.to_string().contains("missing-turn"));
 }

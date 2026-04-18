@@ -21,6 +21,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_secrets::redact_secrets;
@@ -114,6 +115,42 @@ pub(in crate::memories) async fn run(session: &Arc<Session>, config: &Config) {
     emit_metrics(session, &counts);
     info!(
         "memory stage-1 extraction complete: {} job(s) claimed, {} succeeded ({} with output, {} no output), {} failed",
+        counts.claimed,
+        counts.succeeded_with_output + counts.succeeded_no_output,
+        counts.succeeded_with_output,
+        counts.succeeded_no_output,
+        counts.failed
+    );
+}
+
+/// Runs memory phase 1 immediately for the current thread after a completed
+/// root turn.
+pub(in crate::memories) async fn run_for_current_thread(
+    session: &Arc<Session>,
+    config: &Config,
+    cutoff_turn_id: Option<&str>,
+) {
+    let _phase_one_e2e_timer = session
+        .services
+        .session_telemetry
+        .start_timer(metrics::MEMORY_PHASE_ONE_E2E_MS, &[])
+        .ok();
+
+    let Some(claim) = claim_current_thread_job(session, &config.memories).await else {
+        session.services.session_telemetry.counter(
+            metrics::MEMORY_PHASE_ONE_JOBS,
+            /*inc*/ 1,
+            &[("status", "skipped_no_current_thread_candidate")],
+        );
+        return;
+    };
+
+    let stage_one_context = build_request_context(session, config).await;
+    let outcome = job::run(session.as_ref(), claim, &stage_one_context, cutoff_turn_id).await;
+    let counts = aggregate_stats(vec![outcome]);
+    emit_metrics(session, &counts);
+    info!(
+        "memory stage-1 current-thread extraction complete: {} job(s) claimed, {} succeeded ({} with output, {} no output), {} failed",
         counts.claimed,
         counts.succeeded_with_output + counts.succeeded_no_output,
         counts.succeeded_with_output,
@@ -219,6 +256,37 @@ async fn claim_startup_jobs(
     }
 }
 
+async fn claim_current_thread_job(
+    session: &Arc<Session>,
+    memories_config: &MemoriesConfig,
+) -> Option<codex_state::Stage1JobClaim> {
+    let Some(state_db) = session.services.state_db.as_deref() else {
+        warn!("state db unavailable while claiming current-thread memory job; skipping");
+        return None;
+    };
+
+    match state_db
+        .claim_stage1_job_for_thread(
+            session.conversation_id,
+            session.conversation_id,
+            phase_one::JOB_LEASE_SECONDS,
+            memories_config.max_rollouts_per_startup.max(1),
+        )
+        .await
+    {
+        Ok(claim) => claim,
+        Err(err) => {
+            warn!("state db claim_stage1_job_for_thread failed: {err}");
+            session.services.session_telemetry.counter(
+                metrics::MEMORY_PHASE_ONE_JOBS,
+                /*inc*/ 1,
+                &[("status", "failed_claim_current_thread")],
+            );
+            None
+        }
+    }
+}
+
 async fn build_request_context(session: &Arc<Session>, config: &Config) -> RequestContext {
     let model_name = config
         .memories
@@ -247,7 +315,7 @@ async fn run_jobs(
         .map(|claim| {
             let session = Arc::clone(session);
             let stage_one_context = stage_one_context.clone();
-            async move { job::run(session.as_ref(), claim, &stage_one_context).await }
+            async move { job::run(session.as_ref(), claim, &stage_one_context, None).await }
         })
         .buffer_unordered(phase_one::CONCURRENCY_LIMIT)
         .collect::<Vec<_>>()
@@ -261,6 +329,7 @@ mod job {
         session: &Session,
         claim: codex_state::Stage1JobClaim,
         stage_one_context: &RequestContext,
+        cutoff_turn_id: Option<&str>,
     ) -> JobResult {
         let thread = claim.thread;
         let (stage_one_output, token_usage) = match sample(
@@ -268,6 +337,7 @@ mod job {
             &thread.rollout_path,
             &thread.cwd,
             stage_one_context,
+            cutoff_turn_id,
         )
         .await
         {
@@ -315,9 +385,11 @@ mod job {
         rollout_path: &Path,
         rollout_cwd: &Path,
         stage_one_context: &RequestContext,
+        cutoff_turn_id: Option<&str>,
     ) -> anyhow::Result<(StageOneOutput, Option<TokenUsage>)> {
         let (rollout_items, _, _) = RolloutRecorder::load_rollout_items(rollout_path).await?;
-        let rollout_contents = serialize_filtered_rollout_response_items(&rollout_items)?;
+        let rollout_items = rollout_items_for_stage_one(&rollout_items, cutoff_turn_id)?;
+        let rollout_contents = serialize_filtered_rollout_response_items(rollout_items)?;
 
         let prompt = Prompt {
             input: vec![ResponseItem::Message {
@@ -387,6 +459,32 @@ mod job {
         output.rollout_slug = output.rollout_slug.map(redact_secrets);
 
         Ok((output, token_usage))
+    }
+
+    pub(super) fn rollout_items_for_stage_one<'a>(
+        items: &'a [RolloutItem],
+        cutoff_turn_id: Option<&str>,
+    ) -> anyhow::Result<&'a [RolloutItem]> {
+        let Some(cutoff_turn_id) = cutoff_turn_id else {
+            return Ok(items);
+        };
+
+        let cutoff_idx = items
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    RolloutItem::EventMsg(EventMsg::TurnComplete(event))
+                        if event.turn_id == cutoff_turn_id
+                )
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "failed to find TurnComplete marker for turn `{cutoff_turn_id}` in rollout"
+                )
+            })?;
+
+        Ok(&items[..=cutoff_idx])
     }
 
     mod result {

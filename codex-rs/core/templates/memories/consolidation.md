@@ -148,6 +148,52 @@ Incremental thread diff snapshot (computed before the current artifact sync rewr
 **Diff since last consolidation:**
 {{ phase2_input_selection }}
 
+Optional repo-local `.codex/MEMORY.md` maintenance targets:
+{{ project_memory_targets }}
+
+If repo-local targets are listed, update those files in the same pass.
+
+Repo-local target rules:
+
+- Treat each listed `.codex/MEMORY.md` as repo-scoped memory, not global user memory.
+- Keep repo-local memory narrowly focused on durable repo facts, commands, conventions, pitfalls,
+  and recurring project-specific preferences supported by that target's listed thread ids.
+- Do not copy or mirror the full global `{{ memory_root }}/MEMORY.md` into repo-local files.
+- Do not edit repo-local `.codex/MEMORY.md` files directly.
+- For each listed target, write exactly one JSON candidate file at the listed `candidate_file` path.
+- Each candidate file must be valid JSON with this exact top-level shape:
+```json
+{
+  "schema_version": 1,
+  "facts": [
+    {
+      "category": "tooling",
+      "fact": "Package manager is pnpm.",
+      "details": [
+        "Use `pnpm test` for targeted frontend tests."
+      ],
+      "evidence_thread_ids": ["<thread-id>"]
+    }
+  ]
+}
+```
+- Allowed `category` values are broad durable buckets such as `architecture`, `tooling`,
+  `workflow`, `commands`, `testing`, `conventions`, `pitfalls`, `preferences`, and `general`.
+- Keep `fact` concise and stable. Use `details` only for durable supporting specifics.
+- Use only the listed `selected_thread_ids` as `evidence_thread_ids`. Never cite removed threads as
+  evidence in new candidates.
+- Rust will validate, merge, and forget facts using the target's `accepted_facts_file`, then render
+  the repo-local `.codex/MEMORY.md` generated section using these exact markers:
+  - `{{ project_memory_auto_section_begin }}`
+  - `{{ project_memory_auto_section_end }}`
+- Preserve any manual repo-local content by leaving it to the Rust-side merge/render step.
+- If a listed target has removed thread ids, Rust will delete only repo-local memory that was
+  supported solely by those removed thread ids.
+- If a listed target has no remaining high-signal repo-local memory, still write the candidate
+  file, but set `"facts": []`.
+- Only write the listed `candidate_file` paths. Do not write repo-local `.codex/MEMORY.md`
+  directly, and do not write to other repos.
+
 Incremental update and forgetting mechanism:
 
 - Use the diff provided

@@ -1,9 +1,13 @@
+use crate::memories::PROJECT_MEMORY_AUTO_SECTION_BEGIN;
+use crate::memories::PROJECT_MEMORY_AUTO_SECTION_END;
+use crate::memories::ProjectMemoryTarget;
 use crate::memories::extensions::EXTENSION_RESOURCE_RETENTION_DAYS;
 use crate::memories::extensions::RemovedExtensionResource;
 use crate::memories::memory_extensions_root;
 use crate::memories::memory_root;
 use crate::memories::phase_one;
 use crate::memories::storage::rollout_summary_file_stem_from_parts;
+use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelInfo;
 use codex_state::Phase2InputSelection;
 use codex_state::Stage1Output;
@@ -87,6 +91,7 @@ pub(super) fn build_consolidation_prompt(
     memory_root: &Path,
     selection: &Phase2InputSelection,
     removed_extension_resources: &[RemovedExtensionResource],
+    project_memory_targets: &[ProjectMemoryTarget],
 ) -> String {
     let memory_extensions_root = memory_extensions_root(memory_root);
     let memory_extensions_exist = memory_extensions_root.is_dir();
@@ -110,6 +115,7 @@ pub(super) fn build_consolidation_prompt(
     };
     let phase2_input_selection =
         render_phase2_input_selection(selection, removed_extension_resources);
+    let project_memory_targets = render_project_memory_targets(project_memory_targets);
     CONSOLIDATION_PROMPT_TEMPLATE
         .render([
             ("memory_root", memory_root.as_str()),
@@ -122,11 +128,20 @@ pub(super) fn build_consolidation_prompt(
                 memory_extensions_primary_inputs.as_str(),
             ),
             ("phase2_input_selection", phase2_input_selection.as_str()),
+            ("project_memory_targets", project_memory_targets.as_str()),
+            (
+                "project_memory_auto_section_begin",
+                PROJECT_MEMORY_AUTO_SECTION_BEGIN,
+            ),
+            (
+                "project_memory_auto_section_end",
+                PROJECT_MEMORY_AUTO_SECTION_END,
+            ),
         ])
         .unwrap_or_else(|err| {
             warn!("failed to render memories consolidation prompt template: {err}");
             format!(
-                "## Memory Phase 2 (Consolidation)\nConsolidate Codex memories in: {memory_root}\n\n{phase2_input_selection}"
+                "## Memory Phase 2 (Consolidation)\nConsolidate Codex memories in: {memory_root}\n\n{phase2_input_selection}\n\nRepo-local project memory targets:\n{project_memory_targets}"
             )
         })
 }
@@ -195,6 +210,49 @@ fn render_phase2_input_selection(
     }
 
     rendered
+}
+
+fn render_project_memory_targets(project_memory_targets: &[ProjectMemoryTarget]) -> String {
+    if project_memory_targets.is_empty() {
+        return "- none".to_string();
+    }
+
+    let mut rendered = String::new();
+    for target in project_memory_targets {
+        let selected = render_thread_ids(&target.selected_thread_ids);
+        let removed = render_thread_ids(&target.removed_thread_ids);
+        let _ = writeln!(rendered, "- file: {}", target.memory_file.display());
+        let _ = writeln!(
+            rendered,
+            "  - project_root: {}",
+            target.project_root.display()
+        );
+        let _ = writeln!(
+            rendered,
+            "  - candidate_file: {}",
+            target.candidate_file.display()
+        );
+        let _ = writeln!(
+            rendered,
+            "  - accepted_facts_file: {}",
+            target.facts_file.display()
+        );
+        let _ = writeln!(rendered, "  - selected_thread_ids: {selected}");
+        let _ = writeln!(rendered, "  - removed_thread_ids: {removed}");
+    }
+    rendered.trim_end().to_string()
+}
+
+fn render_thread_ids(thread_ids: &[ThreadId]) -> String {
+    if thread_ids.is_empty() {
+        return "none".to_string();
+    }
+
+    thread_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_selected_input_line(item: &Stage1Output, retained: bool) -> String {
